@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 class DataBlock:
     """Блок данных"""
     block_id: int
-    data_size: int = 1024  # условных единиц
+    data_size: int = 1024
     timestamp: datetime = field(default_factory=datetime.now)
 
 @dataclass

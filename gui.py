@@ -4,6 +4,7 @@ import threading
 import time
 from tkinter import filedialog
 import simpy
+from alg import AdaptiveParallelRepairAlgorithm, ParallelRepairAlgorithm, PriorityBasedRepairAlgorithm, SequentialRepairAlgorithm
 from cfg import AggressiveEnvironment, EdgeStorageSystem, MetricsCollector
 
 from datetime import datetime
@@ -11,6 +12,16 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from models import NodeStatus
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import LineChart, Reference
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    print("Предупреждение: openpyxl не установлен. Экспорт в Excel будет недоступен.")
+    print("Установите: pip install openpyxl")
 
 try:
     import tkinter as tk
@@ -26,57 +37,37 @@ class SimulationGUI:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Adaptive Edge Storage Simulator - AESS v2.0")
-        self.root.geometry("1280x800")
+        self.root.title("Adaptive Edge Storage Simulator - AESS v4.0")
+        self.root.geometry("1320x850")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
-        # Переменные для параметров симуляции
+        # Регистрация алгоритмов восстановления
+        self.algorithms = {
+            "sequential": SequentialRepairAlgorithm(),
+            "parallel": ParallelRepairAlgorithm(),
+            "priority": PriorityBasedRepairAlgorithm(),
+            "adaptive": AdaptiveParallelRepairAlgorithm()
+        }
+        self.current_algorithm = tk.StringVar(value="adaptive")
+        
+        # Переменные для параметров
         self.num_nodes = tk.IntVar(value=8)
         self.replication_factor = tk.IntVar(value=3)
         self.failure_rate = tk.DoubleVar(value=0.5)
         self.simulation_time = tk.IntVar(value=100)
         self.min_recovery_time = tk.DoubleVar(value=2.0)
         self.max_recovery_time = tk.DoubleVar(value=8.0)
-        
-        # Режим симуляции: False - по времени, True - бесконечная
         self.infinite_mode = tk.BooleanVar(value=False)
         
-        # Флаг остановки симуляции
+        # Флаги и потоки
         self.stop_simulation_flag = threading.Event()
-        
-        # Состояние симуляции
         self.is_running = False
         self.simulation_thread = None
-        self.env_thread = None
         self.metrics = MetricsCollector()
         
         # Построение интерфейса
         self._build_ui()
     
-    def _validate_int(self, value, from_val, to_val):
-        """Валидация целочисленного ввода"""
-        try:
-            val = int(value)
-            if val < from_val:
-                return str(from_val)
-            if val > to_val:
-                return str(to_val)
-            return str(val)
-        except ValueError:
-            return str(from_val)
-    
-    def _validate_float(self, value, from_val, to_val):
-        """Валидация вещественного ввода"""
-        try:
-            val = float(value)
-            if val < from_val:
-                return str(from_val)
-            if val > to_val:
-                return str(to_val)
-            return str(val)
-        except ValueError:
-            return str(from_val)
-        
     def _build_ui(self):
         """Построение пользовательского интерфейса"""
         
@@ -84,7 +75,7 @@ class SimulationGUI:
         main_paned.pack(fill=tk.BOTH, expand=True)
         
         # ===== ЛЕВАЯ ПАНЕЛЬ =====
-        left_frame = ttk.Frame(main_paned, width=320)
+        left_frame = ttk.Frame(main_paned, width=350)
         main_paned.add(left_frame, weight=0)
         
         title_label = ttk.Label(left_frame, text="⚙️ Adaptive Edge Storage Simulator", 
@@ -95,28 +86,28 @@ class SimulationGUI:
         params_frame = ttk.LabelFrame(left_frame, text="Параметры симуляции", padding=10)
         params_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        # Количество узлов (2-32)
+        # Количество узлов
         nodes_frame = ttk.Frame(params_frame)
         nodes_frame.pack(fill=tk.X, pady=5)
         ttk.Label(nodes_frame, text="Количество узлов:").pack(side=tk.LEFT)
         self.nodes_entry = NumericEntry(nodes_frame, "", 2, 32, 8, step=1, is_int=True)
         self.nodes_entry.pack(side=tk.RIGHT)
         
-        # Фактор репликации (1-5)
+        # Фактор репликации
         rep_frame = ttk.Frame(params_frame)
         rep_frame.pack(fill=tk.X, pady=5)
         ttk.Label(rep_frame, text="Фактор репликации:").pack(side=tk.LEFT)
         self.rep_entry = NumericEntry(rep_frame, "", 1, 5, 3, step=1, is_int=True)
         self.rep_entry.pack(side=tk.RIGHT)
         
-        # Интенсивность сбоев (0-2)
+        # Интенсивность сбоев
         fail_frame = ttk.Frame(params_frame)
         fail_frame.pack(fill=tk.X, pady=5)
         ttk.Label(fail_frame, text="Интенсивность сбоев:").pack(side=tk.LEFT)
         self.fail_entry = NumericEntry(fail_frame, "", 0, 2, 0.5, step=0.1, is_int=False)
         self.fail_entry.pack(side=tk.RIGHT)
         
-        # Время восстановления (мин)
+        # Время восстановления
         rec_frame = ttk.LabelFrame(params_frame, text="Время восстановления узла", padding=5)
         rec_frame.pack(fill=tk.X, pady=5)
         
@@ -132,11 +123,29 @@ class SimulationGUI:
         self.rec_max_entry = NumericEntry(rec_max_frame, "", 1, 30, 8.0, step=0.5, is_int=False)
         self.rec_max_entry.pack(side=tk.RIGHT)
         
+        # Выбор алгоритма
+        algo_frame = ttk.LabelFrame(params_frame, text="Алгоритм восстановления", padding=5)
+        algo_frame.pack(fill=tk.X, pady=5)
+        
+        for key, algo in self.algorithms.items():
+            rb = ttk.Radiobutton(
+                algo_frame, 
+                text=algo.name, 
+                variable=self.current_algorithm, 
+                value=key
+            )
+            rb.pack(anchor=tk.W, pady=2)
+            
+            # Описание алгоритма мелким шрифтом
+            desc_label = ttk.Label(algo_frame, text=f"  {algo.description}", 
+                                   font=('Arial', 8), foreground="gray")
+            desc_label.pack(anchor=tk.W, padx=15, pady=(0, 5))
+        
         # Режим симуляции
         mode_frame = ttk.LabelFrame(params_frame, text="Режим работы", padding=5)
         mode_frame.pack(fill=tk.X, pady=5)
         
-        self.time_mode_radio = ttk.Radiobutton(mode_frame, text="По времени (укажите ниже)", 
+        self.time_mode_radio = ttk.Radiobutton(mode_frame, text="По времени", 
                                                 variable=self.infinite_mode, value=False)
         self.time_mode_radio.pack(anchor=tk.W, pady=2)
         
@@ -160,14 +169,28 @@ class SimulationGUI:
         self.reset_btn = ttk.Button(btn_frame, text="🔄 Сбросить метрики", command=self._reset_metrics)
         self.reset_btn.pack(fill=tk.X, pady=2)
         
-        self.export_btn = ttk.Button(btn_frame, text="💾 Экспорт в CSV", command=self._export_to_csv)
-        self.export_btn.pack(fill=tk.X, pady=2)
+        # Экспорт
+        export_frame = ttk.LabelFrame(btn_frame, text="Экспорт результатов", padding=5)
+        export_frame.pack(fill=tk.X, pady=5)
+        
+        self.export_csv_btn = ttk.Button(export_frame, text="💾 Экспорт в CSV", 
+                                          command=lambda: self._export_results('csv'))
+        self.export_csv_btn.pack(fill=tk.X, pady=2)
+        
+        self.export_excel_btn = ttk.Button(export_frame, text="📊 Экспорт в Excel", 
+                                            command=lambda: self._export_results('excel'))
+        self.export_excel_btn.pack(fill=tk.X, pady=2)
+        
+        if not OPENPYXL_AVAILABLE:
+            self.export_excel_btn.config(state=tk.DISABLED)
+            ttk.Label(export_frame, text="⚠️ Установите openpyxl для Excel", 
+                      font=('Arial', 8), foreground="red").pack()
         
         # Статистика
         stats_frame = ttk.LabelFrame(left_frame, text="📊 Статистика симуляции", padding=10)
         stats_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        self.stats_text = scrolledtext.ScrolledText(stats_frame, height=12, width=35, font=('Courier', 9))
+        self.stats_text = scrolledtext.ScrolledText(stats_frame, height=12, width=38, font=('Courier', 9))
         self.stats_text.pack(fill=tk.BOTH, expand=True)
         
         # ===== ПРАВАЯ ПАНЕЛЬ =====
@@ -192,7 +215,7 @@ class SimulationGUI:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=('Courier', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
-        # Прогресс-бар и индикатор режима
+        # Статус
         status_frame = ttk.Frame(right_frame)
         status_frame.pack(fill=tk.X, pady=5)
         
@@ -202,11 +225,14 @@ class SimulationGUI:
         self.mode_indicator = ttk.Label(status_frame, text="", font=('Arial', 9))
         self.mode_indicator.pack(side=tk.RIGHT, padx=10)
         
+        self.algo_indicator = ttk.Label(status_frame, text="", font=('Arial', 9))
+        self.algo_indicator.pack(side=tk.RIGHT, padx=10)
+    
     def _log(self, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
-        
+    
     def _update_stats_display(self):
         summary = self.metrics.get_summary()
         stats_str = f"""
@@ -229,7 +255,7 @@ class SimulationGUI:
 """
         self.stats_text.delete(1.0, tk.END)
         self.stats_text.insert(tk.END, stats_str)
-        
+    
     def _update_plots(self):
         self.ax1.clear()
         self.ax2.clear()
@@ -259,44 +285,62 @@ class SimulationGUI:
         self.fig.tight_layout()
         self.canvas.draw()
     
-    def _export_to_csv(self):
+    def _export_results(self, format_type: str):
+        """Экспорт результатов в выбранном формате"""
         if not self.metrics.availability_history and not self.metrics.node_failures:
             messagebox.showwarning("Нет данных", "Сначала запустите симуляцию для получения данных")
             return
         
+        if format_type == 'csv':
+            filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
+            default_ext = ".csv"
+            default_name = f"aess_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            export_func = self.metrics.export_to_csv
+        else:  # excel
+            if not OPENPYXL_AVAILABLE:
+                messagebox.showerror("Ошибка", "Библиотека openpyxl не установлена.\nУстановите: pip install openpyxl")
+                return
+            filetypes = [("Excel files", "*.xlsx"), ("All files", "*.*")]
+            default_ext = ".xlsx"
+            default_name = f"aess_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            export_func = self.metrics.export_to_excel
+        
         filepath = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"aess_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            defaultextension=default_ext,
+            filetypes=filetypes,
+            initialfile=default_name
         )
         
         if filepath:
-            success = self.metrics.export_to_csv(filepath)
+            self._log(f"📁 Экспорт в {format_type.upper()}...")
+            success, error_msg = export_func(filepath)
+            
             if success:
-                self._log(f"📁 Результаты экспортированы в: {filepath}")
-                messagebox.showinfo("Экспорт завершён", f"Результаты сохранены в:\n{filepath}")
+                self._log(f"✅ Экспорт успешно завершён: {filepath}")
+                messagebox.showinfo("Экспорт завершён", 
+                                   f"Результаты успешно сохранены в:\n{filepath}\n\nПапка с файлом будет открыта автоматически.")
             else:
-                messagebox.showerror("Ошибка экспорта", "Не удалось сохранить файл")
+                self._log(f"❌ Ошибка экспорта: {error_msg}")
+                messagebox.showerror("Ошибка экспорта", error_msg)
     
     def _start_simulation(self):
         if self.is_running:
             return
         
-        # Получаем значения из полей ввода
+        # Получение значений
         num_nodes = self.nodes_entry.get()
         replication_factor = self.rep_entry.get()
         failure_rate = self.fail_entry.get()
         min_recovery = self.rec_min_entry.get()
         max_recovery = self.rec_max_entry.get()
+        algorithm_key = self.current_algorithm.get()
         
-        # Проверка корректности min/max
         if min_recovery >= max_recovery:
             messagebox.showerror("Ошибка", "Минимальное время восстановления должно быть меньше максимального")
             return
         
-        # Определяем время симуляции
         if self.infinite_mode.get():
-            simulation_duration = None  # Бесконечно
+            simulation_duration = None
             mode_text = "бесконечно"
         else:
             simulation_duration = self.time_entry.get()
@@ -306,13 +350,14 @@ class SimulationGUI:
         self.stop_simulation_flag.clear()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self.export_btn.config(state=tk.DISABLED)
+        self.export_csv_btn.config(state=tk.DISABLED)
+        self.export_excel_btn.config(state=tk.DISABLED)
         self.progress.start()
         
-        # Обновляем индикатор режима
+        algorithm = self.algorithms[algorithm_key]
         self.mode_indicator.config(text=f"🔄 Режим: {mode_text}", foreground="blue")
+        self.algo_indicator.config(text=f"🧠 Алгоритм: {algorithm.name}", foreground="green")
         
-        # Сохраняем параметры
         sim_params = {
             'num_nodes': num_nodes,
             'replication_factor': replication_factor,
@@ -320,7 +365,8 @@ class SimulationGUI:
             'simulation_time': simulation_duration if simulation_duration else 'infinite',
             'min_recovery_time': min_recovery,
             'max_recovery_time': max_recovery,
-            'algorithm': 'BaseParallelRepair (v2.0)',
+            'algorithm': algorithm.name,
+            'algorithm_description': algorithm.description,
             'mode': 'infinite' if simulation_duration is None else 'timed'
         }
         self.metrics.set_simulation_params(sim_params)
@@ -329,20 +375,19 @@ class SimulationGUI:
         self._log(f"   Узлов: {num_nodes}")
         self._log(f"   Репликация: {replication_factor}")
         self._log(f"   Интенсивность сбоев: {failure_rate}")
+        self._log(f"   Алгоритм: {algorithm.name}")
         self._log(f"   Режим: {mode_text}")
         
-        # Запуск в отдельном потоке
         self.simulation_thread = threading.Thread(
             target=self._run_simulation,
             args=(num_nodes, replication_factor, failure_rate, 
-                  min_recovery, max_recovery, simulation_duration)
+                  min_recovery, max_recovery, simulation_duration, algorithm)
         )
         self.simulation_thread.daemon = True
         self.simulation_thread.start()
     
     def _run_simulation(self, num_nodes, replication_factor, failure_rate,
-                        min_recovery, max_recovery, simulation_duration):
-        """Основной цикл симуляции"""
+                        min_recovery, max_recovery, simulation_duration, algorithm):
         try:
             config = {
                 'min_recovery_time': min_recovery,
@@ -351,10 +396,8 @@ class SimulationGUI:
                 'failure_detection_delay': 1.0
             }
             
-            # Создание среды simpy
             env = simpy.Environment()
             
-            # Создание метрик
             self.metrics = MetricsCollector()
             self.metrics.set_simulation_params({
                 'num_nodes': num_nodes,
@@ -363,11 +406,11 @@ class SimulationGUI:
                 'simulation_time': simulation_duration if simulation_duration else 'infinite',
                 'min_recovery_time': min_recovery,
                 'max_recovery_time': max_recovery,
-                'algorithm': 'BaseParallelRepair (v2.0)',
+                'algorithm': algorithm.name,
+                'algorithm_description': algorithm.description,
                 'mode': 'infinite' if simulation_duration is None else 'timed'
             })
             
-            # Создание системы хранения
             storage = EdgeStorageSystem(
                 env=env,
                 num_nodes=num_nodes,
@@ -376,20 +419,18 @@ class SimulationGUI:
                 metrics_collector=self.metrics
             )
             
-            # Симулятор агрессивной среды
             environment = AggressiveEnvironment(
                 env=env,
                 storage_system=storage,
                 failure_rate=failure_rate,
                 config=config,
+                repair_algorithm=algorithm,
                 log_callback=self._log,
                 stop_event=self.stop_simulation_flag
             )
             
-            # Запуск генерации сбоев
             env.process(environment.run())
             
-            # Генератор нагрузки
             def load_generator():
                 while not self.stop_simulation_flag.is_set():
                     if random.random() < 0.3:
@@ -401,7 +442,6 @@ class SimulationGUI:
             
             env.process(load_generator())
             
-            # Мониторинг метрик
             def metrics_monitor():
                 while not self.stop_simulation_flag.is_set():
                     availability = storage.get_availability_score()
@@ -418,15 +458,12 @@ class SimulationGUI:
             
             env.process(metrics_monitor())
             
-            # Запуск симуляции
             if simulation_duration is None:
-                # Бесконечный режим - работаем до флага остановки
                 while not self.stop_simulation_flag.is_set():
-                    env.run(until=env.now + 10)  # Шагами по 10 единиц
+                    env.run(until=env.now + 10)
                     if self.stop_simulation_flag.is_set():
                         break
             else:
-                # Режим по времени
                 env.run(until=simulation_duration)
             
             self.metrics.set_simulation_end_time()
@@ -443,18 +480,21 @@ class SimulationGUI:
         self.is_running = False
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        self.export_btn.config(state=tk.NORMAL)
+        self.export_csv_btn.config(state=tk.NORMAL)
+        if OPENPYXL_AVAILABLE:
+            self.export_excel_btn.config(state=tk.NORMAL)
         self.progress.stop()
         self.mode_indicator.config(text="", foreground="black")
+        self.algo_indicator.config(text="", foreground="black")
         self._update_stats_display()
         self._update_plots()
         self._log("🏁 Симуляция остановлена")
-        
+    
     def _stop_simulation(self):
         if self.is_running:
             self._log("⏸ Остановка симуляции по запросу...")
             self.stop_simulation_flag.set()
-        
+    
     def _reset_metrics(self):
         self.metrics = MetricsCollector()
         self._update_stats_display()
@@ -466,13 +506,13 @@ class SimulationGUI:
         self.canvas.draw()
         
         self._log("🔄 Метрики сброшены")
-        
+    
     def _on_closing(self):
         if self.is_running:
             self.stop_simulation_flag.set()
             time.sleep(0.5)
         self.root.destroy()
-        
+    
     def run(self):
         self.root.mainloop()
 
@@ -486,28 +526,23 @@ class NumericEntry(ttk.Frame):
         self.step = step
         self.is_int = is_int
         
-        # Переменная для хранения значения
         if is_int:
             self.value = tk.IntVar(value=default)
         else:
             self.value = tk.DoubleVar(value=default)
         
-        # Метка
-        ttk.Label(self, text=label).pack(side=tk.LEFT, padx=5)
+        if label:
+            ttk.Label(self, text=label).pack(side=tk.LEFT, padx=5)
         
-        # Кнопка "-"
         self.minus_btn = ttk.Button(self, text="-", width=3, command=self._decrement)
         self.minus_btn.pack(side=tk.LEFT)
         
-        # Поле ввода
         self.entry = ttk.Entry(self, textvariable=self.value, width=8)
         self.entry.pack(side=tk.LEFT, padx=5)
         
-        # Кнопка "+"
         self.plus_btn = ttk.Button(self, text="+", width=3, command=self._increment)
         self.plus_btn.pack(side=tk.LEFT)
         
-        # Привязываем валидацию
         self.entry.bind('<FocusOut>', self._validate)
         self.entry.bind('<Return>', self._validate)
     
@@ -537,7 +572,6 @@ class NumericEntry(ttk.Frame):
             
             self.value.set(val)
         except ValueError:
-            # Если введено не число, возвращаем предыдущее значение
             pass
     
     def get(self):

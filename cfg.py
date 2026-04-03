@@ -1,12 +1,26 @@
 import csv
+import os
+import platform
 import random
+import subprocess
 import sys
 import simpy
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
+from alg import BaseRepairAlgorithm
 from models import DataBlock, EdgeNode, NodeStatus
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.chart import LineChart, Reference
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    print("Предупреждение: openpyxl не установлен. Экспорт в Excel будет недоступен.")
+    print("Установите: pip install openpyxl")
 
 try:
     import simpy
@@ -91,6 +105,7 @@ class EdgeStorageSystem:
         return None
     
     def repair_degraded_replicas(self, block_id: int):
+        """Базовая операция восстановления реплик"""
         if block_id not in self.block_placement:
             return
         
@@ -148,11 +163,13 @@ class AggressiveEnvironment:
     """Симулятор агрессивных условий внешней среды"""
     
     def __init__(self, env: simpy.Environment, storage_system: EdgeStorageSystem,
-                 failure_rate: float, config: Dict, log_callback=None, stop_event=None):
+                 failure_rate: float, config: Dict, repair_algorithm: BaseRepairAlgorithm,
+                 log_callback=None, stop_event=None):
         self.env = env
         self.storage = storage_system
         self.failure_rate = failure_rate
         self.config = config
+        self.repair_algorithm = repair_algorithm
         self.log_callback = log_callback
         self.active = True
         self.stop_event = stop_event
@@ -184,43 +201,24 @@ class AggressiveEnvironment:
             self._log(f"[ВОССТАНОВЛЕНИЕ] Узел {node.node_id} начинает восстановление")
             yield self.env.process(node.recover())
             self._log(f"[ВОССТАНОВЛЕНИЕ] Узел {node.node_id} восстановлен в момент {self.env.now:.1f}")
-            self.env.process(self._parallel_data_repair())
+            
+            # Запуск выбранного алгоритма восстановления
+            self.env.process(self._run_repair_algorithm(node.node_id))
     
-    def _parallel_data_repair(self):
-        self._log(f"[РЕПАР] Запуск параллельного восстановления данных")
-        
-        blocks_to_repair = []
-        for block_id, nodes in self.storage.block_placement.items():
-            has_live = any(self.storage.nodes[n].status == NodeStatus.ONLINE for n in nodes)
-            if not has_live:
-                blocks_to_repair.append(block_id)
-        
-        if blocks_to_repair:
-            self._log(f"[РЕПАР] Требуется восстановление {len(blocks_to_repair)} блоков")
-            
-            repair_tasks = []
-            for block_id in blocks_to_repair[:50]:
-                repair_tasks.append(self.env.process(
-                    self._repair_single_block(block_id)
-                ))
-            
-            yield self.env.timeout(0)
-            for task in repair_tasks:
-                yield task
-            
-            self._log(f"[РЕПАР] Восстановление завершено")
-    
-    def _repair_single_block(self, block_id: int):
-        repair_time = random.uniform(0.5, 2.0)
-        yield self.env.timeout(repair_time)
-        self.storage.repair_degraded_replicas(block_id)
+    def _run_repair_algorithm(self, failed_node_id: int):
+        """Запуск выбранного алгоритма восстановления"""
+        self._log(f"[АЛГОРИТМ] Запуск алгоритма: {self.repair_algorithm.name}")
+        yield self.env.process(self.repair_algorithm.repair(
+            self.env, self.storage, failed_node_id, self._log
+        ))
+        self._log(f"[АЛГОРИТМ] Алгоритм {self.repair_algorithm.name} завершил работу")
     
     def _log(self, message: str):
         if self.log_callback:
             self.log_callback(f"[{self.env.now:.1f}] {message}")
 
 class MetricsCollector:
-    """Сбор метрик с поддержкой CSV экспорта"""
+    """Сбор метрик с поддержкой CSV и Excel экспорта"""
     
     def __init__(self):
         self.reset()
@@ -291,8 +289,43 @@ class MetricsCollector:
             'total_blocks_written': len(self.write_successes)
         }
     
-    def export_to_csv(self, filepath: str) -> bool:
+    def _open_file_location(self, filepath: str):
+        """Открыть папку с файлом в проводнике"""
         try:
+            path = os.path.dirname(filepath)
+            if not path:  # Если файл сохраняется в текущей директории
+                path = os.getcwd()
+            
+            if os.path.exists(path):
+                if platform.system() == 'Windows':
+                    os.startfile(path)
+                elif platform.system() == 'Darwin':  # macOS
+                    subprocess.run(['open', path], check=False)
+                else:  # Linux
+                    subprocess.run(['xdg-open', path], check=False)
+        except Exception as e:
+            # Не критичная ошибка - просто логируем, но не прерываем экспорт
+            print(f"Не удалось открыть папку: {e}")
+    
+    def export_to_csv(self, filepath: str) -> Tuple[bool, str]:
+        """
+        Экспорт в CSV файл
+        Returns: (success, error_message)
+        """
+        try:
+            # Проверка возможности записи в директорию
+            directory = os.path.dirname(filepath)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+            
+            # Проверка прав на запись
+            if os.path.exists(filepath):
+                if not os.access(filepath, os.W_OK):
+                    return False, f"Нет прав на запись в файл: {filepath}"
+            else:
+                if directory and not os.access(directory, os.W_OK):
+                    return False, f"Нет прав на запись в директорию: {directory}"
+            
             with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
                 
@@ -334,45 +367,224 @@ class MetricsCollector:
                     writer.writerow([f'{time:.2f}', node_id])
                 writer.writerow([])
                 
-                writer.writerow(['[ВОССТАНОВЛЕНИЯ УЗЛОВ]'])
-                writer.writerow(['Время', 'ID узла'])
-                for time, node_id in self.node_recoveries:
-                    writer.writerow([f'{time:.2f}', node_id])
-                writer.writerow([])
-                
                 writer.writerow(['[ОПЕРАЦИИ ЗАПИСИ]'])
                 writer.writerow(['ID блока', 'Записано реплик', 'Целевое число реплик'])
                 for block_id, written, target in self.write_successes:
                     writer.writerow([block_id, written, target])
-                
-                if self.write_failures:
-                    writer.writerow([])
-                    writer.writerow(['[НЕУДАЧНЫЕ ЗАПИСИ]'])
-                    writer.writerow(['ID блока', 'Причина'])
-                    for block_id, reason in self.write_failures:
-                        writer.writerow([block_id, reason])
-                writer.writerow([])
-                
-                writer.writerow(['[ОПЕРАЦИИ ЧТЕНИЯ]'])
-                writer.writerow(['ID блока', 'Узел-источник'])
-                for block_id, node_id in self.read_successes:
-                    writer.writerow([block_id, node_id])
-                
-                if self.read_failures:
-                    writer.writerow([])
-                    writer.writerow(['[НЕУДАЧНЫЕ ЧТЕНИЯ]'])
-                    writer.writerow(['ID блока'])
-                    for block_id in self.read_failures:
-                        writer.writerow([block_id])
                 writer.writerow([])
                 
                 writer.writerow(['[ОПЕРАЦИИ ВОССТАНОВЛЕНИЯ]'])
                 writer.writerow(['ID блока', 'Узел-источник', 'Узел-назначение'])
                 for block_id, source, target in self.repair_successes:
                     writer.writerow([block_id, source, target])
-                
-            return True
             
+            self._open_file_location(filepath)
+            return True, ""
+            
+        except PermissionError as e:
+            return False, f"Ошибка доступа: {e}. Возможно, файл открыт в другой программе."
+        except OSError as e:
+            return False, f"Ошибка файловой системы: {e}"
         except Exception as e:
-            print(f"Ошибка при экспорте CSV: {e}")
-            return False
+            return False, f"Неизвестная ошибка: {e}"
+    
+    def export_to_excel(self, filepath: str) -> Tuple[bool, str]:
+        """
+        Экспорт в Excel файл с форматированием и графиками
+        Returns: (success, error_message)
+        """
+        if not OPENPYXL_AVAILABLE:
+            return False, "Библиотека openpyxl не установлена. Установите: pip install openpyxl"
+        
+        try:
+            # Проверка возможности записи в директорию
+            directory = os.path.dirname(filepath)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+            
+            # Проверка прав на запись
+            if os.path.exists(filepath):
+                if not os.access(filepath, os.W_OK):
+                    return False, f"Нет прав на запись в файл: {filepath}"
+            else:
+                if directory and not os.access(directory, os.W_OK):
+                    return False, f"Нет прав на запись в директорию: {directory}"
+            
+            wb = Workbook()
+            
+            # Стили
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+            title_font = Font(bold=True, size=14)
+            
+            # ===== Лист 1: Параметры и сводка =====
+            ws_summary = wb.active
+            ws_summary.title = "Параметры и сводка"
+            
+            # Заголовок
+            ws_summary['A1'] = "АДАПТИВНЫЙ EDGE STORAGE SIMULATOR"
+            ws_summary['A1'].font = title_font
+            ws_summary.merge_cells('A1:C1')
+            
+            # Параметры симуляции
+            ws_summary['A3'] = "ПАРАМЕТРЫ СИМУЛЯЦИИ"
+            ws_summary['A3'].font = header_font
+            ws_summary['A3'].fill = header_fill
+            
+            row = 4
+            for key, value in self.simulation_params.items():
+                ws_summary[f'A{row}'] = str(key)
+                ws_summary[f'B{row}'] = str(value)
+                row += 1
+            ws_summary[f'A{row}'] = "Время начала"
+            ws_summary[f'B{row}'] = str(self.simulation_start_time)
+            row += 1
+            ws_summary[f'A{row}'] = "Время окончания"
+            ws_summary[f'B{row}'] = str(self.simulation_end_time)
+            row += 2
+            
+            # Сводная статистика
+            ws_summary[f'A{row}'] = "СВОДНАЯ СТАТИСТИКА"
+            ws_summary[f'A{row}'].font = header_font
+            ws_summary[f'A{row}'].fill = header_fill
+            row += 1
+            
+            summary = self.get_summary()
+            for key, value in summary.items():
+                ws_summary[f'A{row}'] = str(key)
+                ws_summary[f'B{row}'] = value
+                row += 1
+            
+            # ===== Лист 2: Доступность данных =====
+            ws_avail = wb.create_sheet("Доступность данных")
+            ws_avail['A1'] = "Время"
+            ws_avail['B1'] = "Доступность"
+            ws_avail['A1'].font = header_font
+            ws_avail['B1'].font = header_font
+            ws_avail['A1'].fill = header_fill
+            ws_avail['B1'].fill = header_fill
+            
+            for i, (time, score) in enumerate(self.availability_history, start=2):
+                ws_avail[f'A{i}'] = time
+                ws_avail[f'B{i}'] = score
+            
+            # Добавление графика доступности
+            if len(self.availability_history) > 1:
+                chart = LineChart()
+                chart.title = "Доступность данных во времени"
+                chart.x_axis.title = "Время"
+                chart.y_axis.title = "Доступность"
+                
+                data = Reference(ws_avail, min_col=2, min_row=1, max_row=len(self.availability_history)+1)
+                categories = Reference(ws_avail, min_col=1, min_row=2, max_row=len(self.availability_history)+1)
+                chart.add_data(data, titles_from_data=True)
+                chart.set_categories(categories)
+                ws_avail.add_chart(chart, "D2")
+            
+            # ===== Лист 3: Состояние узлов =====
+            ws_health = wb.create_sheet("Состояние узлов")
+            ws_health['A1'] = "Время"
+            ws_health['B1'] = "Работающие узлы"
+            ws_health['C1'] = "Всего узлов"
+            for col in ['A', 'B', 'C']:
+                ws_health[f'{col}1'].font = header_font
+                ws_health[f'{col}1'].fill = header_fill
+            
+            for i, (time, online, total) in enumerate(self.health_history, start=2):
+                ws_health[f'A{i}'] = time
+                ws_health[f'B{i}'] = online
+                ws_health[f'C{i}'] = total
+            
+            # График состояния узлов
+            if len(self.health_history) > 1:
+                chart = LineChart()
+                chart.title = "Состояние узлов во времени"
+                chart.x_axis.title = "Время"
+                chart.y_axis.title = "Количество узлов"
+                
+                data = Reference(ws_health, min_col=2, max_col=3, min_row=1, max_row=len(self.health_history)+1)
+                categories = Reference(ws_health, min_col=1, min_row=2, max_row=len(self.health_history)+1)
+                chart.add_data(data, titles_from_data=True)
+                chart.set_categories(categories)
+                ws_health.add_chart(chart, "E2")
+            
+            # ===== Лист 4: Отказы узлов =====
+            ws_failures = wb.create_sheet("Отказы узлов")
+            ws_failures['A1'] = "Время"
+            ws_failures['B1'] = "ID узла"
+            ws_failures['A1'].font = header_font
+            ws_failures['B1'].font = header_font
+            ws_failures['A1'].fill = header_fill
+            ws_failures['B1'].fill = header_fill
+            
+            for i, (time, node_id) in enumerate(self.node_failures, start=2):
+                ws_failures[f'A{i}'] = time
+                ws_failures[f'B{i}'] = node_id
+            
+            # ===== Лист 5: Операции =====
+            ws_ops = wb.create_sheet("Операции")
+            ws_ops['A1'] = "Тип операции"
+            ws_ops['B1'] = "ID блока"
+            ws_ops['C1'] = "Доп. информация"
+            for col in ['A', 'B', 'C']:
+                ws_ops[f'{col}1'].font = header_font
+                ws_ops[f'{col}1'].fill = header_fill
+            
+            row = 2
+            for block_id, written, target in self.write_successes:
+                ws_ops[f'A{row}'] = "Запись успешна"
+                ws_ops[f'B{row}'] = block_id
+                ws_ops[f'C{row}'] = f"{written}/{target} реплик"
+                row += 1
+            
+            for block_id, reason in self.write_failures:
+                ws_ops[f'A{row}'] = "Запись не удалась"
+                ws_ops[f'B{row}'] = block_id
+                ws_ops[f'C{row}'] = reason
+                row += 1
+            
+            for block_id, source, target in self.repair_successes:
+                ws_ops[f'A{row}'] = "Восстановление"
+                ws_ops[f'B{row}'] = block_id
+                ws_ops[f'C{row}'] = f"с {source} на {target}"
+                row += 1
+            
+            # ===== Автоматическая ширина столбцов (ИСПРАВЛЕНО) =====
+            for ws in wb.worksheets:
+                # Получаем все столбцы, которые используются в листе
+                if ws.max_row > 0 and ws.max_column > 0:
+                    for col_idx in range(1, ws.max_column + 1):
+                        max_length = 0
+                        col_letter = None
+                        try:
+                            col_letter = ws.cell(row=1, column=col_idx).column_letter
+                        except AttributeError:
+                            # Если не удалось получить column_letter, пропускаем
+                            continue
+                        
+                        # Проходим по строкам в этом столбце
+                        for row_idx in range(1, ws.max_row + 1):
+                            try:
+                                cell = ws.cell(row=row_idx, column=col_idx)
+                                if cell.value is not None:
+                                    cell_length = len(str(cell.value))
+                                    if cell_length > max_length:
+                                        max_length = cell_length
+                            except Exception:
+                                continue
+                        
+                        # Устанавливаем ширину с запасом
+                        adjusted_width = min(max_length + 2, 50)
+                        if col_letter:
+                            ws.column_dimensions[col_letter].width = adjusted_width
+            
+            wb.save(filepath)
+            self._open_file_location(filepath)
+            return True, ""
+            
+        except PermissionError as e:
+            return False, f"Ошибка доступа: {e}. Возможно, файл открыт в Excel. Закройте файл и повторите попытку."
+        except OSError as e:
+            return False, f"Ошибка файловой системы: {e}"
+        except Exception as e:
+            return False, f"Неизвестная ошибка: {e}"
