@@ -1,21 +1,15 @@
-
+import random
+import sys
+import simpy
 
 from collections import defaultdict
 from datetime import datetime
-import random
 from typing import Dict, List, Optional, Set
-
-import simpy
-
 from models import DataBlock, EdgeNode, NodeStatus
 
 try:
     import simpy
     import numpy as np
-    import matplotlib
-    matplotlib.use('TkAgg')  # Для корректной работы в GUI
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 except ImportError as e:
@@ -439,4 +433,63 @@ class EdgeStorageSystem:
             'availability': self.get_availability_score(),
             'replication_factor': self.replication_factor,
             'node_stats': [n.get_stats() for n in self.nodes]
+        }
+
+class MetricsCollector:
+    """Сбор метрик для анализа и визуализации"""
+    
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.node_failures = []  # (time, node_id)
+        self.node_recoveries = []  # (time, node_id)
+        self.write_successes = []  # (time, block_id, replicas_written, target_replicas)
+        self.write_failures = []  # (time, block_id, reason)
+        self.read_successes = []  # (time, block_id, node_id)
+        self.read_failures = []  # (time, block_id)
+        self.repair_successes = []  # (time, block_id, source, target)
+        
+        self.availability_history = []  # (time, score)
+        self.health_history = []  # (time, online_nodes, total_nodes)
+        
+    def record_node_failure(self, node_id: int, time: float):
+        self.node_failures.append((time, node_id))
+        
+    def record_node_recovery(self, node_id: int, time: float):
+        self.node_recoveries.append((time, node_id))
+        
+    def record_write_success(self, block_id: int, replicas_written: int, target_replicas: int):
+        self.write_successes.append((block_id, replicas_written, target_replicas))
+        
+    def record_write_failure(self, block_id: int, reason: str):
+        self.write_failures.append((block_id, reason))
+        
+    def record_read_success(self, block_id: int, node_id: int):
+        self.read_successes.append((block_id, node_id))
+        
+    def record_read_failure(self, block_id: int):
+        self.read_failures.append((block_id))
+        
+    def record_repair_success(self, block_id: int, source_node: int, target_node: int):
+        self.repair_successes.append((block_id, source_node, target_node))
+        
+    def record_availability(self, time: float, score: float):
+        self.availability_history.append((time, score))
+        
+    def record_health(self, time: float, online_nodes: int, total_nodes: int):
+        self.health_history.append((time, online_nodes, total_nodes))
+        
+    def get_summary(self) -> Dict:
+        """Получить сводную статистику"""
+        return {
+            'total_failures': len(self.node_failures),
+            'total_recoveries': len(self.node_recoveries),
+            'total_writes_success': len(self.write_successes),
+            'total_writes_failed': len(self.write_failures),
+            'total_reads_success': len(self.read_successes),
+            'total_reads_failed': len(self.read_failures),
+            'total_repairs': len(self.repair_successes),
+            'avg_replicas_per_write': np.mean([w[1] for w in self.write_successes]) if self.write_successes else 0,
+            'write_success_rate': len(self.write_successes) / (len(self.write_successes) + len(self.write_failures)) if (self.write_successes or self.write_failures) else 1.0
         }

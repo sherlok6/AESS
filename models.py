@@ -1,8 +1,12 @@
+import random
+import simpy
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-import random
 from typing import Dict, List, Optional
+
+
 
 @dataclass
 class DataBlock:
