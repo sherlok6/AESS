@@ -30,8 +30,6 @@ class NodeStatus(Enum):
     RECOVERING = "recovering"
 
 class EdgeNode:
-    """Узел периферийного хранения данных"""
-    
     def __init__(self, node_id: int, env: simpy.Environment, 
                  config: Dict, metrics_collector):
         self.node_id = node_id

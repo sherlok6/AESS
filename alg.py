@@ -1,11 +1,16 @@
 import abc
 import random
+import sys
 
 from models import NodeStatus
 
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 class BaseRepairAlgorithm(abc.ABC):
-    """Базовый класс для всех алгоритмов восстановления"""
+    """Base class for repair algorithms"""
     
     def __init__(self, name: str, description: str):
         self.name = name
@@ -13,214 +18,172 @@ class BaseRepairAlgorithm(abc.ABC):
     
     @abc.abstractmethod
     def repair(self, env, storage_system, failed_node_id: int, log_callback=None):
-        """
-        Алгоритм восстановления данных после отказа узла
-        
-        Args:
-            env: simpy среда
-            storage_system: ссылка на EdgeStorageSystem
-            failed_node_id: ID отказавшего узла
-            log_callback: функция для логирования
-        """
         pass
 
 
 class SequentialRepairAlgorithm(BaseRepairAlgorithm):
-    """Последовательный алгоритм восстановления (базовый)"""
+    """Sequential repair algorithm"""
     
     def __init__(self):
         super().__init__(
-            "Последовательный (Sequential)",
-            "Восстанавливает блоки данных один за другим. Простой, но медленный."
+            "Sequential",
+            "Repairs data blocks one by one. Simple but slow."
         )
     
     def repair(self, env, storage_system, failed_node_id: int, log_callback=None):
-        """Последовательное восстановление"""
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: начало восстановления")
+            log_callback(f"[ALGO] {self.name}: starting repair")
         
-        # Сбор блоков, которые были на отказавшем узле
         blocks_to_repair = []
         for block_id, nodes in storage_system.block_placement.items():
             if failed_node_id in nodes:
                 blocks_to_repair.append(block_id)
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] Найдено {len(blocks_to_repair)} блоков для восстановления")
+            log_callback(f"[ALGO] Found {len(blocks_to_repair)} blocks to repair")
         
-        # Последовательное восстановление
         for block_id in blocks_to_repair:
-            # Симуляция времени восстановления одного блока
             repair_time = random.uniform(0.5, 1.5)
             yield env.timeout(repair_time)
             storage_system.repair_degraded_replicas(block_id)
             if log_callback:
-                log_callback(f"[АЛГОРИТМ] Восстановлен блок {block_id}")
+                log_callback(f"[ALGO] Repaired block {block_id}")
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: восстановление завершено")
+            log_callback(f"[ALGO] {self.name}: repair completed")
 
 
 class ParallelRepairAlgorithm(BaseRepairAlgorithm):
-    """Параллельный алгоритм восстановления (улучшенный)"""
+    """Parallel repair algorithm"""
     
     def __init__(self, max_parallel: int = 5):
         super().__init__(
-            "Параллельный (Parallel)",
-            f"Восстанавливает до {max_parallel} блоков одновременно. Быстрее последовательного."
+            "Parallel",
+            f"Repairs up to {max_parallel} blocks simultaneously."
         )
         self.max_parallel = max_parallel
     
     def repair(self, env, storage_system, failed_node_id: int, log_callback=None):
-        """Параллельное восстановление"""
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: начало восстановления (max_parallel={self.max_parallel})")
+            log_callback(f"[ALGO] {self.name}: starting repair (max_parallel={self.max_parallel})")
         
-        # Сбор блоков, которые были на отказавшем узле
         blocks_to_repair = []
         for block_id, nodes in storage_system.block_placement.items():
             if failed_node_id in nodes:
                 blocks_to_repair.append(block_id)
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] Найдено {len(blocks_to_repair)} блоков для восстановления")
+            log_callback(f"[ALGO] Found {len(blocks_to_repair)} blocks to repair")
         
-        # Параллельное восстановление
-        repair_tasks = []
-        for block_id in blocks_to_repair[:50]:  # Ограничиваем для производительности
-            repair_tasks.append(self._repair_block(env, storage_system, block_id, log_callback))
-        
-        # Ожидание завершения всех параллельных задач
-        for task in repair_tasks:
-            yield task
+        # Create repair tasks and wait for them properly
+        for block_id in blocks_to_repair[:50]:
+            # Use env.process() and yield from the process
+            yield env.process(self._repair_block(env, storage_system, block_id, log_callback))
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: восстановление завершено")
+            log_callback(f"[ALGO] {self.name}: repair completed")
     
     def _repair_block(self, env, storage_system, block_id: int, log_callback=None):
-        """Восстановление одного блока"""
         repair_time = random.uniform(0.5, 1.5)
         yield env.timeout(repair_time)
         storage_system.repair_degraded_replicas(block_id)
 
 
 class PriorityBasedRepairAlgorithm(BaseRepairAlgorithm):
-    """Приоритетный алгоритм восстановления"""
+    """Priority-based repair algorithm"""
     
     def __init__(self):
         super().__init__(
-            "Приоритетный (Priority-based)",
-            "Сначала восстанавливает критически важные блоки данных."
+            "Priority-based",
+            "Repairs critical data blocks first."
         )
     
     def repair(self, env, storage_system, failed_node_id: int, log_callback=None):
-        """Восстановление с приоритетами"""
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: начало восстановления")
+            log_callback(f"[ALGO] {self.name}: starting repair")
         
-        # Сбор блоков с приоритетами (чем больше реплик потеряно, тем выше приоритет)
         blocks_with_priority = []
         for block_id, nodes in storage_system.block_placement.items():
             if failed_node_id in nodes:
-                # Приоритет = количество живых реплик (чем меньше, тем выше приоритет)
                 alive_replicas = sum(1 for n in nodes if storage_system.nodes[n].status == NodeStatus.ONLINE)
-                priority = 10 - alive_replicas  # Чем меньше живых реплик, тем выше приоритет
+                priority = 10 - alive_replicas
                 blocks_with_priority.append((priority, block_id))
         
-        # Сортировка по приоритету (от большего к меньшему)
         blocks_with_priority.sort(reverse=True)
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] Найдено {len(blocks_with_priority)} блоков для восстановления")
+            log_callback(f"[ALGO] Found {len(blocks_with_priority)} blocks to repair")
         
-        # Восстановление с учётом приоритета
         for priority, block_id in blocks_with_priority:
-            repair_time = random.uniform(0.3, 1.0)  # Более быстрые для приоритетных
+            repair_time = random.uniform(0.3, 1.0)
             yield env.timeout(repair_time)
             storage_system.repair_degraded_replicas(block_id)
             if log_callback:
-                log_callback(f"[АЛГОРИТМ] Восстановлен блок {block_id} (приоритет={priority})")
+                log_callback(f"[ALGO] Repaired block {block_id} (priority={priority})")
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: восстановление завершено")
+            log_callback(f"[ALGO] {self.name}: repair completed")
 
 
 class AdaptiveParallelRepairAlgorithm(BaseRepairAlgorithm):
-    """Адаптивный параллельный алгоритм (ваш алгоритм для диссертации)"""
+    """Adaptive parallel repair algorithm - YOUR ALGORITHM"""
     
     def __init__(self):
         super().__init__(
-            "Адаптивный параллельный (Adaptive Parallel) - РАЗРАБОТАННЫЙ",
-            "Адаптивно изменяет степень параллелизма в зависимости от нагрузки и состояния сети. Является основным разработанным алгоритмом в рамках диссертации."
+            "Adaptive Parallel",
+            "Adaptively changes parallelism based on system state."
         )
     
     def repair(self, env, storage_system, failed_node_id: int, log_callback=None):
-        """
-        АДАПТИВНЫЙ ПАРАЛЛЕЛЬНЫЙ АЛГОРИТМ
-        Это место для вашей реализации! Здесь должен быть ваш алгоритм.
-        """
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: начало восстановления (ВАШ АЛГОРИТМ)")
+            log_callback(f"[ALGO] {self.name}: starting repair (YOUR ALGORITHM)")
         
-        # ================================================================
-        # TODO: ЗДЕСЬ ВАША РЕАЛИЗАЦИЯ АЛГОРИТМА ДЛЯ ДИССЕРТАЦИИ
-        # ================================================================
-        #
-        # Текущая реализация - демонстрационная. Замените её на ваш алгоритм.
-        #
-        # Идеи для улучшения:
-        # 1. Анализ текущей загрузки узлов
-        # 2. Динамическое изменение степени параллелизма
-        # 3. Оптимизация маршрутов передачи данных
-        # 4. Предсказание отказов на основе истории
-        # 5. Использование кодов коррекции ошибок
-        #
-        # ================================================================
-        
-        # Сбор блоков для восстановления
+        # Collect blocks that were on the failed node
         blocks_to_repair = []
         for block_id, nodes in storage_system.block_placement.items():
             if failed_node_id in nodes:
                 blocks_to_repair.append(block_id)
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] Найдено {len(blocks_to_repair)} блоков для восстановления")
+            log_callback(f"[ALGO] Found {len(blocks_to_repair)} blocks to repair")
         
-        # Адаптивное определение степени параллелизма
-        # Чем больше блоков, тем выше параллелизм (но не более 10)
+        # Adaptive parallelism based on number of blocks
         adaptive_parallelism = min(10, max(2, len(blocks_to_repair) // 10 + 1))
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] Адаптивный параллелизм: {adaptive_parallelism}")
+            log_callback(f"[ALGO] Adaptive parallelism: {adaptive_parallelism}")
         
-        # Адаптивное время восстановления (зависит от количества блоков)
+        # Adaptive repair time
         base_repair_time = 0.5
         if len(blocks_to_repair) > 50:
             base_repair_time = 1.0
         elif len(blocks_to_repair) > 20:
             base_repair_time = 0.7
         
-        # Параллельное восстановление с адаптацией
+        # Create repair tasks list
         repair_tasks = []
         for i, block_id in enumerate(blocks_to_repair[:100]):
-            # Динамическая задержка для имитации адаптации
             dynamic_delay = base_repair_time * (1 + 0.1 * (i % adaptive_parallelism))
-            repair_tasks.append(self._adaptive_repair_block(
-                env, storage_system, block_id, dynamic_delay, log_callback
-            ))
+            repair_tasks.append((block_id, dynamic_delay))
         
-        # Запуск параллельных задач с ограничением
+        # Execute in batches with proper simpy syntax
         for i in range(0, len(repair_tasks), adaptive_parallelism):
             batch = repair_tasks[i:i + adaptive_parallelism]
-            for task in batch:
-                yield task
-            if log_callback:
-                log_callback(f"[АЛГОРИТМ] Завершена группа {i//adaptive_parallelism + 1}")
+            # Start all tasks in the batch
+            processes = []
+            for block_id, delay in batch:
+                processes.append(env.process(self._adaptive_repair_block(
+                    env, storage_system, block_id, delay, log_callback
+                )))
+            # Wait for all tasks in this batch to complete
+            for proc in processes:
+                yield proc
+            if log_callback and len(batch) > 0:
+                log_callback(f"[ALGO] Completed batch {i//adaptive_parallelism + 1}")
         
         if log_callback:
-            log_callback(f"[АЛГОРИТМ] {self.name}: восстановление завершено")
+            log_callback(f"[ALGO] {self.name}: repair completed")
     
     def _adaptive_repair_block(self, env, storage_system, block_id: int, 
                                 delay: float, log_callback=None):
-        """Адаптивное восстановление блока"""
         yield env.timeout(delay)
         storage_system.repair_degraded_replicas(block_id)
