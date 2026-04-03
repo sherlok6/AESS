@@ -2,6 +2,7 @@ import random
 import sys
 import threading
 import time
+from tkinter import filedialog
 import simpy
 from cfg import AggressiveEnvironment, EdgeStorageSystem, MetricsCollector
 
@@ -25,7 +26,7 @@ class SimulationGUI:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Adaptive Edge Storage Simulator - AESS v1.0")
+        self.root.title("Adaptive Edge Storage Simulator - AESS v1.1")
         self.root.geometry("1280x800")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
@@ -121,6 +122,10 @@ class SimulationGUI:
         self.reset_btn = ttk.Button(btn_frame, text="🔄 Сбросить метрики", command=self._reset_metrics)
         self.reset_btn.pack(fill=tk.X, pady=2)
         
+        # Кнопка экспорта CSV
+        self.export_btn = ttk.Button(btn_frame, text="💾 Экспорт в CSV", command=self._export_to_csv)
+        self.export_btn.pack(fill=tk.X, pady=2)
+        
         # Статистика
         stats_frame = ttk.LabelFrame(left_frame, text="📊 Статистика симуляции", padding=10)
         stats_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -178,6 +183,8 @@ class SimulationGUI:
 ╠══════════════════════════════════════╣
 ║ Ср. реплик на запись:   {summary['avg_replicas_per_write']:>6.2f}
 ║ Успешность записи:      {summary['write_success_rate']*100:>6.1f}%
+║ Средняя доступность:    {summary['avg_availability']*100:>6.1f}%
+║ Мин. доступность:       {summary['min_availability']*100:>6.1f}%
 ╚══════════════════════════════════════╝
 """
         self.stats_text.delete(1.0, tk.END)
@@ -214,6 +221,30 @@ class SimulationGUI:
         
         self.fig.tight_layout()
         self.canvas.draw()
+    
+    def _export_to_csv(self):
+        """Экспорт результатов симуляции в CSV файл"""
+        if not self.metrics.availability_history and not self.metrics.node_failures:
+            messagebox.showwarning("Нет данных", 
+                                  "Сначала запустите симуляцию для получения данных")
+            return
+        
+        # Диалог выбора файла
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"aess_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        
+        if filepath:
+            success = self.metrics.export_to_csv(filepath)
+            if success:
+                self._log(f"📁 Результаты экспортированы в: {filepath}")
+                messagebox.showinfo("Экспорт завершён", 
+                                   f"Результаты успешно сохранены в файл:\n{filepath}")
+            else:
+                messagebox.showerror("Ошибка экспорта", 
+                                    "Не удалось сохранить файл. Проверьте права доступа.")
         
     def _start_simulation(self):
         """Запуск симуляции в отдельном потоке"""
@@ -223,7 +254,20 @@ class SimulationGUI:
         self.is_running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.export_btn.config(state=tk.DISABLED)
         self.progress.start()
+        
+        # Сохраняем параметры симуляции для CSV
+        sim_params = {
+            'num_nodes': self.num_nodes.get(),
+            'replication_factor': self.replication_factor.get(),
+            'failure_rate': self.failure_rate.get(),
+            'simulation_time': self.simulation_time.get(),
+            'min_recovery_time': self.min_recovery_time.get(),
+            'max_recovery_time': self.max_recovery_time.get(),
+            'algorithm': 'BaseParallelRepair (v1.1)'
+        }
+        self.metrics.set_simulation_params(sim_params)
         
         self._log("🚀 Запуск симуляции...")
         self._log(f"   Узлов: {self.num_nodes.get()}")
@@ -252,6 +296,15 @@ class SimulationGUI:
             
             # Создание метрик
             self.metrics = MetricsCollector()
+            self.metrics.set_simulation_params({
+                'num_nodes': self.num_nodes.get(),
+                'replication_factor': self.replication_factor.get(),
+                'failure_rate': self.failure_rate.get(),
+                'simulation_time': self.simulation_time.get(),
+                'min_recovery_time': self.min_recovery_time.get(),
+                'max_recovery_time': self.max_recovery_time.get(),
+                'algorithm': 'BaseParallelRepair (v1.1)'
+            })
             
             # Создание системы хранения
             storage = EdgeStorageSystem(
@@ -310,6 +363,9 @@ class SimulationGUI:
             # Запуск симуляции
             env.run(until=self.simulation_time.get())
             
+            # Фиксируем окончание симуляции
+            self.metrics.set_simulation_end_time()
+            
             self._log("✅ Симуляция завершена успешно")
             
         except Exception as e:
@@ -324,6 +380,7 @@ class SimulationGUI:
         self.is_running = False
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
+        self.export_btn.config(state=tk.NORMAL)
         self.progress.stop()
         self._update_stats_display()
         self._update_plots()
