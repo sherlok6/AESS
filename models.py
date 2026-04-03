@@ -22,11 +22,15 @@ class Replica:
     node_id: int
     is_valid: bool = True
 
+class NodeStatus(Enum):
+    """Состояние узла хранения"""
+    ONLINE = "online"
+    OFFLINE = "offline"
+    DEGRADED = "degraded"
+    RECOVERING = "recovering"
+
 class EdgeNode:
-    """
-    Узел периферийного хранения данных.
-    Работает в агрессивных условиях - может выходить из строя.
-    """
+    """Узел периферийного хранения данных"""
     
     def __init__(self, node_id: int, env: simpy.Environment, 
                  config: Dict, metrics_collector):
@@ -35,13 +39,12 @@ class EdgeNode:
         self.config = config
         self.metrics = metrics_collector
         self.status = NodeStatus.ONLINE
-        self.data: Dict[int, DataBlock] = {}  # block_id -> DataBlock
-        self.replicas: List[int] = []  # список block_id на этом узле
+        self.data: Dict[int, DataBlock] = {}
+        self.replicas: List[int] = []
         self.last_failure_time = None
         self.recovery_time = None
         
     def store_block(self, block: DataBlock) -> bool:
-        """Сохранить блок данных на узле"""
         if self.status != NodeStatus.ONLINE:
             return False
         self.data[block.block_id] = block
@@ -50,30 +53,25 @@ class EdgeNode:
         return True
     
     def read_block(self, block_id: int) -> Optional[DataBlock]:
-        """Прочитать блок данных"""
         if self.status != NodeStatus.ONLINE:
             return None
         return self.data.get(block_id)
     
     def delete_block(self, block_id: int):
-        """Удалить блок данных"""
         if block_id in self.data:
             del self.data[block_id]
         if block_id in self.replicas:
             self.replicas.remove(block_id)
     
     def fail(self):
-        """Отказ узла (агрессивная среда)"""
         if self.status == NodeStatus.ONLINE:
             self.status = NodeStatus.OFFLINE
             self.last_failure_time = self.env.now
             self.metrics.record_node_failure(self.node_id, self.env.now)
     
     def recover(self):
-        """Восстановление узла после отказа"""
         if self.status == NodeStatus.OFFLINE:
             self.status = NodeStatus.RECOVERING
-            # Симуляция времени восстановления оборудования
             recovery_delay = random.uniform(
                 self.config['min_recovery_time'],
                 self.config['max_recovery_time']
@@ -84,7 +82,6 @@ class EdgeNode:
             self.metrics.record_node_recovery(self.node_id, self.env.now)
     
     def get_stats(self) -> Dict:
-        """Получить статистику узла"""
         return {
             'node_id': self.node_id,
             'status': self.status.value,
@@ -93,10 +90,3 @@ class EdgeNode:
             'last_failure': self.last_failure_time,
             'last_recovery': self.recovery_time
         }
-
-class NodeStatus(Enum):
-    """Состояние узла хранения"""
-    ONLINE = "online"
-    OFFLINE = "offline"
-    DEGRADED = "degraded"
-    RECOVERING = "recovering"
